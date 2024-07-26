@@ -18,6 +18,7 @@ class Servidor:
         src_port, dst_port, seq_no, ack_no, \
             flags, window_size, checksum, urg_ptr = read_header(segment)
 
+        print(f'Received segment from {src_addr}:{src_port} to {dst_addr}:{dst_port}')
         # Consideramos somente a porta do nosso servidor
         if dst_port != self.porta:
             return
@@ -30,7 +31,8 @@ class Servidor:
 
         # Estabelecer conexão
         if (flags & FLAGS_SYN) == FLAGS_SYN:
-            conexao = self.conexoes[id_conexao] = Conexao(self, id_conexao)
+            print(f'Estabelecendo conexão com {src_addr}:{src_port}')
+            conexao = self.conexoes[id_conexao] = Conexao(self, id_conexao, seq_no)
             # confirma estabelecimento de conexão
             conexao.enviar_syn_ack()
             if self.callback:
@@ -51,7 +53,7 @@ class Conexao:
         self.servidor = servidor
         self.id_conexao = id_conexao
         self.callback = None
-        self.timer = asyncio.get_event_loop().call_later(1, self._exemplo_timer)
+        #self.timer = asyncio.get_event_loop().call_later(1, self._exemplo_timer)
         #self.timer.cancel()   #é possível cancelar o timer chamando esse método
 
     def _exemplo_timer(self):
@@ -59,11 +61,12 @@ class Conexao:
 
     # envia um acknowledge/reconhecimento da tentativa de conexão
     def enviar_syn_ack(self):
+        print('Enviando SYN-ACK')
         src_addr, src_port, dst_addr, dst_port = self.id_conexao
         self.server_seq_n = 0 # modificar para um numero aleatorio posteriormente por segurança
         ack_n = self.cliente_seq_n + 1
         flags = FLAGS_SYN | FLAGS_ACK
-        segmento = make_header(src_port, dst_port, self.server_seq_n, flags)
+        segmento = make_header(src_port, dst_port, self.server_seq_n, ack_n, flags)
         segmento = fix_checksum(segmento, src_addr, dst_addr)
         self.servidor.rede.enviar(segmento, dst_addr) 
 
