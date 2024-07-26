@@ -100,12 +100,58 @@ Segundamente podemos comparar se o arquivo foi totalmente recebido, afinal, no f
             self.enviar_ack(self.seq_n_esperado)
 ```
 ## Passo 3 — 1 ponto
+Para completar esse passo precisamos, dentre algumas coisas, passar uma flag de ACKnowledge para confirmar o recebimento de um pacote,
+só então criamos um cabeçalho com as informações de envio e os dados em si
 
-...
+```python
+ def enviar(self, dados):
+        src_addr, src_port, dst_addr, dst_port = self.id_conexao
+        flags = FLAGS_ACK
+        # passamos o numero que caracteriza o servidor/recebedor e o numero esperado do cliente que vai receber
+        segmento = make_header(src_port, dst_port, self.server_seq_n, self.seq_n_esperado, flags)
+        segmento += dados
+        segmento = fix_checksum(segmento, src_addr, dst_addr)
+        self.servidor.rede.enviar(segmento, dst_addr)
+        """
+        assim como adicionamos o tamanho do payload na função de recebimento,
+        precisamos adicionar o tamanho do payload no numero de quem enviou também
+        """
+        self.server_seq_n += len(dados) 
+
+```
 
 ## Passo 4 — 1 ponto
+Para encerramento de uma conexão utilizando protocolo TCP, é necessário que ambos os lados decidam encerrar e comuniquem-se sobre isso, quase como duas pessoas dizendo tchau no telefone.
 
-...
+![image](https://github.com/user-attachments/assets/c2f32c52-84f1-4e6f-bfee-c4b9574624e8)
+
+Então, uma entidade envia a flag FIN com intuito de FINalizar a conexão, e o outro lado reconhece essa tentativa enviando uma flag de ACK em resposta.
+O mesmo acontece com a outra entidade, envia uma flag FIN para ser respondida com um ACK
+
+```python
+def fechar(self):
+        src_addr, src_port, dst_addr, dst_port = self.id_conexao
+        flags = FLAGS_FIN | FLAGS_ACK
+        segmento = make_header(src_port, dst_port, self.server_seq_n, self.seq_n_esperado, flags)
+        segmento = fix_checksum(segmento, src_addr, dst_addr)
+        self.servidor.rede.enviar(segmento, dst_addr)
+```
+
+Só são enviadas informações padrões do cabeçalho (portas, endereços) e as flags que indicam o encerramento.
+
+Para isso causar algum efeito, devemos adicionar uma verificação nas funções que tem responsabilidade de receber um pacote, A.K.A *rdt_rcv* de conexao
+
+```python
+def _rdt_rcv(self, seq_no, ack_no, flags, payload):
+        print('recebido payload: %r' % payload)
+
+        if(flags & FLAGS_FIN) == FLAGS_FIN: 
+            self.enviar_ack(seq_no + 1)
+            if self.callback:
+                self.callback(self, b'')
+            return
+        #[...]
+``` 
 
 ## Passo 5 — 2 pontos
 
