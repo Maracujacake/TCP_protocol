@@ -15,8 +15,7 @@ class Servidor:
         self.callback = callback
 
     def _rdt_rcv(self, src_addr, dst_addr, segment):
-        src_port, dst_port, seq_no, ack_no, \
-            flags, window_size, checksum, urg_ptr = read_header(segment)
+        src_port, dst_port, seq_no, ack_no, flags, window_size, checksum, urg_ptr = read_header(segment)
 
         print(f'Received segment from {src_addr}:{src_port} to {dst_addr}:{dst_port}')
         # Consideramos somente a porta do nosso servidor
@@ -74,6 +73,7 @@ class Conexao:
         src_addr, src_port, dst_addr, dst_port = self.id_conexao
         flags = FLAGS_ACK
         segmento = make_header(src_port, dst_port, self.server_seq_n, ack_n, flags)
+        segmento = fix_checksum(segmento, src_addr, dst_addr)
         self.servidor.rede.enviar(segmento, dst_addr)
 
     # seq_no = cliente_seq_n
@@ -98,10 +98,11 @@ class Conexao:
             - ao receber um payload de 100 bytes, passa a ser 101
             - proximo payload que começa no 101 (ou no 100 pq começa em 0?) vai verificar o número esperado pra ver se bate
             """
-            self.seq_n_esperado += len(payload)
-            self.enviar_ack(self.seq_n_esperado)
             if self.callback:
                 self.callback(self, payload)
+            self.seq_n_esperado += len(payload)
+            self.enviar_ack(self.seq_n_esperado)
+            
 
         # recebimento fora de ordem
         else:
