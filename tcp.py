@@ -1,6 +1,8 @@
 import asyncio
+import time
 # arquivo disponibilizado pelo prof. com funções que facilitam a implementação
 from tcputils import *
+
 
 
 class Servidor:
@@ -46,17 +48,44 @@ class Servidor:
 
 class Conexao:
     def __init__(self, servidor, id_conexao, cliente_seq_n):
+        # identificadores para checagem de pacotes
         self.cliente_seq_n = cliente_seq_n
         self.server_seq_n = 0 # número arbitrário, alterar se necessário
-        self.seq_n_esperado = cliente_seq_n + 1 # número para verificar a ordem da conversação entre usuário e servidor
+        self.seq_n_esperado = cliente_seq_n + 1
+
         self.servidor = servidor
         self.id_conexao = id_conexao
         self.callback = None
-        #self.timer = asyncio.get_event_loop().call_later(1, self._exemplo_timer)
-        #self.timer.cancel()   #é possível cancelar o timer chamando esse método
+
+        # reenvio e reconhecimento de pacotes
+        self.pacotes_nao_rec = {} # get(seq_no, valor_pacote)
+        self.timer = None
+        self.EstimatedRTT = None
+        self.DevRTT = None
+        self.G = 0.1 # Não passado em aula, é utilizado para suavização do tempo
 
     def _exemplo_timer(self):
         print('Este é um exemplo de como fazer um timer')
+
+    def iniciar_timer(self, intervalo):
+        self.timer = asyncio.get_event_loop().call_later(intervalo, self.reenviar_pacotes_nao_reconhecidos)
+
+    def cancelar_timer(self):
+        self.timer.cancel()
+        self.timer = None
+    
+    def TimeoutInterval(self):
+        # primeiro pacote a ser enviado
+        if(self.EstimatedRTT == None or self.DevRTT == None):
+            return 1.0
+        
+        return self.EstimatedRTT + max(self.G, 4 * self.DevRTT) # volta o valor de DevRTT na maior parte das vezes
+
+    def reenviar_pacotes(self):
+        for segmento in self.pacotes_nao_rec.items():
+            print("Reenviando segmento")
+            self.servidor.rede.enviar(segmento, self.id_conexao[2])
+        self.iniciar_timer(1)
 
     # envia um acknowledge/reconhecimento da tentativa de conexão
     def enviar_syn_ack(self):
@@ -69,6 +98,7 @@ class Conexao:
         segmento = fix_checksum(segmento, src_addr, dst_addr)
         self.servidor.rede.enviar(segmento, dst_addr) 
 
+
     def enviar_ack(self, ack_n):
         src_addr, src_port, dst_addr, dst_port = self.id_conexao
         flags = FLAGS_ACK
@@ -76,9 +106,33 @@ class Conexao:
         segmento = fix_checksum(segmento, src_addr, dst_addr)
         self.servidor.rede.enviar(segmento, dst_addr)
 
+
     # seq_no = cliente_seq_n
     def _rdt_rcv(self, seq_no, ack_no, flags, payload):
         print('recebido payload: %r' % payload)
+
+        if(ack_no in self.pacotes_nao_rec):
+            # tempo que demorou para o pacote ser transmitido
+            sample_rtt = time.time() - self.envio_inicio
+
+            # caso seja o primeiro pacote a ser transmitido
+            if(self.EstimatedRTT == None):
+                self.EstimatedRTT = sample_rtt
+                self.DevRTT = sample_rtt / 2
+
+            #atualiza os valores com base no tempo de transmissao
+            else:
+                alpha = 0.125
+                beta = 0.25
+                self.EstimatedRTT = (1 - alpha) * self.EstimatedRTT + alpha * sample_rtt
+                self.DevRTT = (1 - beta) * self.DevRTT + beta * abs(sample_rtt - self.EstimatedRTT)
+
+            # inicia o timer com o novo padrão
+            self.cancelar_timer()
+            self.iniciar_timer(self.TimeoutInterval)
+
+            # retira o pacote da lista de não reconhecidos
+            del self.pacotes_nao_rec[ack_no]
 
         if(flags & FLAGS_FIN) == FLAGS_FIN: 
             self.enviar_ack(seq_no + 1)
@@ -102,12 +156,18 @@ class Conexao:
                 self.callback(self, payload)
             self.seq_n_esperado += len(payload)
             self.enviar_ack(self.seq_n_esperado)
-            
-
         # recebimento fora de ordem
         else:
             # envia sem alterar o n_esperado
             self.enviar_ack(self.seq_n_esperado)
+
+        # recebimento do pacote concluido, retira-o do conjunto de pacotes não reconhecidos e para o timer
+        if(ack_no > self.server_seq_n):
+            self.server_seq_n = ack_no
+            if(ack_no in self.pacotes_nao_rec):
+                del self.pacotes_nao_rec[ack_no]
+            # cancela o timer para evitar possíveis retransmissões
+            self.cancelar_timer()
 
 
     # Os métodos abaixo fazem parte da API
@@ -123,12 +183,18 @@ class Conexao:
         segmento = make_header(src_port, dst_port, self.server_seq_n, self.seq_n_esperado, flags)
         segmento += dados
         segmento = fix_checksum(segmento, src_addr, dst_addr)
+        self.envio_inicio = time.time()
         self.servidor.rede.enviar(segmento, dst_addr)
         """
         assim como adicionamos o tamanho do payload na função de recebimento,
         precisamos adicionar o tamanho do payload no numero de quem enviou também
         """
-        self.server_seq_n += len(dados) 
+        self.pacotes_nao_rec[self.server_seq_n] = segmento
+        self.server_seq_n += len(dados)
+
+        # inicia timer para reenvio se necessario.
+        self.iniciar_timer(self.TimeoutInterval())
+
 
     def fechar(self):
         src_addr, src_port, dst_addr, dst_port = self.id_conexao
