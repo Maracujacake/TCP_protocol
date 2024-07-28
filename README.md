@@ -165,7 +165,7 @@ Na imagem acima (Slide - 41, Kurose) podemos ver exatamente essa situação ocor
 Para isso, precisamos implementar uma função que inicie este timer e uma que o encerre para quando o pacote for recebido:
 ```python
     def iniciar_timer(self, intervalo):
-        self.timer = asyncio.get_event_loop().call_later(intervalo, self.reenviar_pacotes_nao_reconhecidos)
+        self.timer = asyncio.get_event_loop().call_later(intervalo, self.reenviar_pacotes)
 
     def cancelar_timer(self):
         self.timer.cancel()

@@ -47,6 +47,8 @@ class Servidor:
 
 
 class Conexao:
+    MSS = 1
+
     def __init__(self, servidor, id_conexao, cliente_seq_n):
         # identificadores para checagem de pacotes
         self.cliente_seq_n = cliente_seq_n
@@ -56,6 +58,10 @@ class Conexao:
         self.servidor = servidor
         self.id_conexao = id_conexao
         self.callback = None
+
+        #congestionamento
+        self.cwnd = Conexao.MSS # janela de congestionamento / congestion window
+        self.ssthresh = 64 * Conexao.MSS
 
         # reenvio e reconhecimento de pacotes
         self.pacotes_nao_rec = {} # get(seq_no, valor_pacote)
@@ -68,7 +74,7 @@ class Conexao:
         print('Este é um exemplo de como fazer um timer')
 
     def iniciar_timer(self, intervalo):
-        self.timer = asyncio.get_event_loop().call_later(intervalo, self.reenviar_pacotes_nao_reconhecidos)
+        self.timer = asyncio.get_event_loop().call_later(intervalo, self.TimeoutOcorrido)
 
     def cancelar_timer(self):
         self.timer.cancel()
@@ -86,6 +92,11 @@ class Conexao:
             print("Reenviando segmento")
             self.servidor.rede.enviar(segmento, self.id_conexao[2])
         self.iniciar_timer(1)
+
+    def TimeoutOcorrido(self):
+        self.ssthresh = max(self.cwnd // 2, Conexao.MSS)
+        self.cwnd = Conexao.MSS
+        self.reenviar_pacotes() # após a reconfiguração da janela de congest., envia novamente o pacote
 
     # envia um acknowledge/reconhecimento da tentativa de conexão
     def enviar_syn_ack(self):
@@ -133,6 +144,13 @@ class Conexao:
 
             # retira o pacote da lista de não reconhecidos
             del self.pacotes_nao_rec[ack_no]
+
+
+        if(len(self.pacotes_nao_rec) == 0):
+            if(self.cwnd < self.ssthresh):
+                self.cwnd += Conexao.MSS
+            else:
+                self.cwnd += (Conexao.MSS * Conexao.MSS)
 
         if(flags & FLAGS_FIN) == FLAGS_FIN: 
             self.enviar_ack(seq_no + 1)
