@@ -99,7 +99,7 @@ Segundamente podemos comparar se o arquivo foi totalmente recebido, afinal, no f
             # envia sem alterar o n_esperado
             self.enviar_ack(self.seq_n_esperado)
 ```
-## Passo 3 — 1 ponto
+## Passo 3 — Envio de dados
 Para completar esse passo precisamos, dentre algumas coisas, passar uma flag de ACKnowledge para confirmar o recebimento de um pacote,
 só então criamos um cabeçalho com as informações de envio e os dados em si
 
@@ -120,7 +120,7 @@ só então criamos um cabeçalho com as informações de envio e os dados em si
 
 ```
 
-## Passo 4 — 1 ponto
+## Passo 4 — Pausa e fechamento de conexões
 Para encerramento de uma conexão utilizando protocolo TCP, é necessário que ambos os lados decidam encerrar e comuniquem-se sobre isso, quase como duas pessoas dizendo tchau no telefone.
 
 ![image](https://github.com/user-attachments/assets/c2f32c52-84f1-4e6f-bfee-c4b9574624e8)
@@ -151,13 +151,118 @@ def _rdt_rcv(self, seq_no, ack_no, flags, payload):
                 self.callback(self, b'')
             return
         #[...]
-``` 
+```
 
-## Passo 5 — 2 pontos
 
-...
-## Passo 6 — 2 pontos
-...
+## Passo 5 — Tratamento de perda de pacotes 
+Como em uma comunicação, por qualquer que seja o motivo, informação (ou pacotes) podem ser perdidos, precisamos saber quando  isso ocorre e uma forma de tratar esse acontecimento.
+Neste caso, usamos um timer. Ele tem a função de medir o tempo do momento que o pacote for enviado até ele ser recebido e, se determinada quantia de tempo passar sem que a confirmação do recebimento seja sinalizada, ele solta um "aviso" para que o pacote seja enviado novamente
+
+![image](https://github.com/user-attachments/assets/0092a0b2-9bca-4931-bd77-c3b8f9a2cfe6)
+
+Na imagem acima (Slide - 41, Kurose) podemos ver exatamente essa situação ocorrendo
+
+Para isso, precisamos implementar uma função que inicie este timer e uma que o encerre para quando o pacote for recebido:
+```python
+    def iniciar_timer(self, intervalo):
+        self.timer = asyncio.get_event_loop().call_later(intervalo, self.reenviar_pacotes_nao_reconhecidos)
+
+    def cancelar_timer(self):
+        self.timer.cancel()
+        self.timer = None
+```
+
+Além disso, precisamos de uma função que reenviará os pacotes perdidos e precisamos iniciar esse timer no momento em que o pacote for enviado:
+
+```python
+    def reenviar_pacotes(self):
+        for segmento in self.pacotes_nao_rec.items():
+            print("Reenviando segmento")
+            self.servidor.rede.enviar(segmento, self.id_conexao[2])
+        self.iniciar_timer(1)
+```
+
+```python
+    def enviar(self, dados):
+        #[...]
+        self.envio_inicio = time.time()
+        self.servidor.rede.enviar(segmento, dst_addr)
+        """
+        assim como adicionamos o tamanho do payload na função de recebimento,
+        precisamos adicionar o tamanho do payload no numero de quem enviou também
+        """
+        self.pacotes_nao_rec[self.server_seq_n] = segmento
+        self.server_seq_n += len(dados)
+
+        # inicia timer para reenvio se necessario.
+        self.iniciar_timer(self.TimeoutInterval())
+```
+
+Também chamamos a função que encerra o timer no eventual recebimento do pacote
+```python
+    def _rdt_rcv(self, seq_no, ack_no, flags, payload):
+        # [...]
+        # recebimento do pacote concluido, retira-o do conjunto de pacotes não reconhecidos e para o timer
+        if(ack_no > self.server_seq_n):
+            self.server_seq_n = ack_no
+            if(ack_no in self.pacotes_nao_rec):
+                del self.pacotes_nao_rec[ack_no]
+            # cancela o timer para evitar possíveis retransmissões
+            self.cancelar_timer()
+```
+Lembrando que adicionamos um dicionário de pacotes_não_reconhecidos em Conexão
+
+## Passo 6 — Tempo de tolerância para perda de pacotes
+Como podemos inferir quanto tempo é adequado para que um pacote seja dado como "Deu ruim, tem que enviar de novo"? Não podemos escolher um número arbitrário como, sei lá, 1 segundo. Imagine que estamos tratando de pacotes de informações ENORMES que não teriam como ser enviados em um segundo.. daria problema. Para isso, podemos medir um tempo adequado utilizando o seguinte:
+
+![image](https://github.com/user-attachments/assets/8b40f889-2181-4f0d-b085-9297009f8fa1)
+
+Sendo:
+
+EstimatedRTT = (1 - alpha) * EstimatedRTT + alpha * sample_rtt,
+
+DevRTT = (1 - beta) * DevRTT + beta * abs(sample_rtt - self.EstimatedRTT)
+
+Definimos então a função e a atualizamos conforme os pacotes forem sendo recebidos, lembrando que no primeiro a ser enviado/recebido utilizamos um valor fixo, afinal não dá pra ter uma noção sem pelo menos UM pacote ter sido enviado
+
+```python
+    def TimeoutInterval(self):
+        # primeiro pacote a ser enviado
+        if(self.EstimatedRTT == None or self.DevRTT == None):
+            return 1.0
+        
+        return self.EstimatedRTT + max(self.G, 4 * self.DevRTT) # volta o valor de DevRTT na maior parte das vezes
+```
+
+```python
+    def _rdt_rcv(self, seq_no, ack_no, flags, payload):
+        print('recebido payload: %r' % payload)
+
+        if(ack_no in self.pacotes_nao_rec):
+            # tempo que demorou para o pacote ser transmitido
+            sample_rtt = time.time() - self.envio_inicio
+
+            # caso seja o primeiro pacote a ser transmitido
+            if(self.EstimatedRTT == None):
+                self.EstimatedRTT = sample_rtt
+                self.DevRTT = sample_rtt / 2
+
+            #atualiza os valores com base no tempo de transmissao
+            else:
+                alpha = 0.125
+                beta = 0.25
+                self.EstimatedRTT = (1 - alpha) * self.EstimatedRTT + alpha * sample_rtt
+                self.DevRTT = (1 - beta) * self.DevRTT + beta * abs(sample_rtt - self.EstimatedRTT)
+
+            # inicia o timer com o novo padrão
+            self.cancelar_timer()
+            self.iniciar_timer(self.TimeoutInterval)
+
+            # retira o pacote da lista de não reconhecidos
+            del self.pacotes_nao_rec[ack_no]
+#[...]
+```
+
 
 ## Passo 7 — 2 pontos
 ...
