@@ -264,7 +264,31 @@ Definimos então a função e a atualizamos conforme os pacotes forem sendo rece
 ```
 
 
-## Passo 7 — 2 pontos
-...
+## Passo 7 — Janela de congestionamento
+Quando enviamos arquivos muito grandes ou então muitos arquivos estão sendo enviados, pode ser que acabe gerando congestionamento na rede (podendo ocasionar em lentidão, perda de pacotes, etc). Para evitar isso, utilizamos uma "janela" de congestionamento, isto é, um intervalo de "tamanho" de dados que serão enviados e devem ser sinalizados como recebidos para enviar uma nova parcela de dados do mesmo tamanho ou gradualmente maior
 
+![image](https://github.com/user-attachments/assets/1c65d82a-9a1b-4d0d-9c49-c91147e5d9c2)
 
+Na imagem acima podemos ver o estado de slow start, isto é, conforme os primeiros pacotes vão sendo enviados, o tamanho da janela (colocamos como 1) vai aumentando gradualmente em pequenos valores e quando atingir um ápice, que consideramos aqui como 64 (64 * 1 = 64), o aumento se torna ainda maior
+
+```python
+    def _rdt_rcv(self, seq_no, ack_no, flags, payload):
+#[...]
+        if(len(self.pacotes_nao_rec) == 0):
+            if(self.cwnd < self.ssthresh):
+                self.cwnd += Conexao.MSS
+            else:
+                self.cwnd += (Conexao.MSS * Conexao.MSS)
+#[...]
+```
+
+No entanto, sempre que um timeout ocorre, isto é, sempre que algum pacote é perdido ou atrasado, cortamos o "ápice"/"teto" pela metade e voltamos a janela ao valor original:
+
+```python
+    def TimeoutOcorrido(self):
+        self.ssthresh = max(self.cwnd // 2, Conexao.MSS)
+        self.cwnd = Conexao.MSS
+        self.reenviar_pacotes() # após a reconfiguração da janela de congest., envia novamente o pacote
+```
+
+Isso é feito pois, para que haja perda de pacote, algo (como congestionamento na rede) deve ter ocorrido.
