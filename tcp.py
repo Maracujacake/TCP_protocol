@@ -1,6 +1,7 @@
 import asyncio
 from collections import deque
 from math import ceil
+import random
 import time
 # arquivo disponibilizado pelo prof. com funções que facilitam a implementação
 from tcputils import *
@@ -37,7 +38,7 @@ class Servidor:
 
             # Passo 1
             # Numero arbitrario
-            seq_envio = 0
+            seq_envio = random.randint(0, 0xffff)
             # Atribua o próximo número de sequência esperado pelo dispositivo receptor
             ack_envio = seq_no + 1
             # Construa um segmento com SYN+ACK
@@ -64,7 +65,7 @@ class Conexao:
         self.servidor = servidor
         self.id_conexao = id_conexao
         self.callback = None
-        self.seq_envio = 0
+        self.seq_envio = random.randint(0, 0xffff)
         self.seq_no_eperado = seq_no + 1
         self.seq_no_comprimento = ack_no
         self.fila_seguimentos_enviados = deque()
