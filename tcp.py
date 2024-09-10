@@ -1,4 +1,5 @@
 import asyncio
+from collections import deque
 from math import ceil
 import time
 # arquivo disponibilizado pelo prof. com funções que facilitam a implementação
@@ -32,9 +33,21 @@ class Servidor:
 
         # Estabelecer conexão
         if (flags & FLAGS_SYN) == FLAGS_SYN:
-            conexao = self.conexoes[id_conexao] = Conexao(self, id_conexao, seq_no)
-            # confirma estabelecimento de conexão
-            conexao.enviar_syn_ack()
+            conexao = self.conexoes[id_conexao] = Conexao(self, id_conexao, seq_no, ack_no)
+
+            # Passo 1
+            # Numero arbitrario
+            seq_envio = 0
+            # Atribua o próximo número de sequência esperado pelo dispositivo receptor
+            ack_envio = seq_no + 1
+            # Construa um segmento com SYN+ACK
+            segment = make_header(dst_port, src_port, seq_envio, ack_envio, FLAGS_SYN | FLAGS_ACK)
+            # Corrija o checksum do segmento
+            response = fix_checksum(segment, dst_addr, src_addr)
+            # Envie o segmento de resposta
+            self.rede.enviar(response, src_addr)
+            # Fim do passo 1
+
             if self.callback:
                 self.callback(conexao)
         elif id_conexao in self.conexoes:
@@ -46,31 +59,24 @@ class Servidor:
 
 
 class Conexao:
-    MSS = 1
-
-    def __init__(self, servidor, id_conexao, cliente_seq_n):
-        # identificadores para checagem de pacotes
-        self.cliente_seq_n = cliente_seq_n
-        self.server_seq_n = 0 # número arbitrário, alterar se necessário
-        self.seq_n_esperado = cliente_seq_n + 1
-
+    # Adicionado seq_no e ack_no
+    def __init__(self, servidor, id_conexao, seq_no, ack_no):
         self.servidor = servidor
         self.id_conexao = id_conexao
         self.callback = None
-
-        #congestionamento
-        self.cwnd = Conexao.MSS # janela de congestionamento / congestion window
-        self.ssthresh = 64 * Conexao.MSS
-
-        # reenvio e reconhecimento de pacotes
-        self.pacotes_nao_rec = {} # get(seq_no, valor_pacote)
-        self.timer = None
-        self.EstimatedRTT = None
-        self.DevRTT = None
-        self.G = 0.1 # Não passado em aula, é utilizado para suavização do tempo
-
-    def _exemplo_timer(self):
-        print('Este é um exemplo de como fazer um timer')
+        self.seq_envio = 0
+        self.seq_no_eperado = seq_no + 1
+        self.seq_no_comprimento = ack_no
+        self.fila_seguimentos_enviados = deque()
+        self.fila_seguimentos_esperando = deque()
+        self.comprimento_seguimentos_enviados = 0
+        self.tamanho_janela = 1 * MSS
+        self.checado = False
+        self.SampleRTT = 1
+        self.EstimatedRTT = self.SampleRTT
+        self.DevRTT = self.SampleRTT/2
+        self.TimeoutInterval = 1
+        self.timer = None 
 
     def _temporizador(self):
         self.timer = None
@@ -91,60 +97,18 @@ class Conexao:
             # Configura um temporizador para chamar a função _temporizador após o intervalo de tempo especificado.
             self.timer = asyncio.get_event_loop().call_later(self.TimeoutInterval, self._temporizador)
 
-    def iniciar_timer(self, intervalo):
-        self.timer = asyncio.get_event_loop().call_later(intervalo, self.TimeoutOcorrido)
 
-    def cancelar_timer(self):
-        self.timer.cancel()
-        self.timer = None
-    
-    def TimeoutInterval(self):
-        # primeiro pacote a ser enviado
-        if(self.EstimatedRTT == None or self.DevRTT == None):
-            return 1.0
-        
-        return self.EstimatedRTT + max(self.G, 4 * self.DevRTT)
-
-    def reenviar_pacotes(self):
-        for segmento in self.pacotes_nao_rec.items():
-            print("Reenviando segmento")
-            self.servidor.rede.enviar(segmento, self.id_conexao[2])
-        self.iniciar_timer(1)
-
-    def TimeoutOcorrido(self):
-        self.ssthresh = max(self.cwnd // 2, Conexao.MSS)
-        self.cwnd = Conexao.MSS
-        self.reenviar_pacotes() # após a reconfiguração da janela de congest., envia novamente o pacote
-
-    # envia um acknowledge/reconhecimento da tentativa de conexão
-    def enviar_syn_ack(self):
-        print('Enviando SYN-ACK')
-        src_addr, src_port, dst_addr, dst_port = self.id_conexao
-        self.server_seq_n = 0 # modificar para um numero aleatorio posteriormente por segurança
-        ack_n = self.cliente_seq_n + 1
-        flags = FLAGS_SYN | FLAGS_ACK
-        segmento = make_header(src_port, dst_port, self.server_seq_n, ack_n, flags)
-        segmento = fix_checksum(segmento, src_addr, dst_addr)
-        self.servidor.rede.enviar(segmento, dst_addr) 
-
-
-    def enviar_ack(self, ack_n):
-        src_addr, src_port, dst_addr, dst_port = self.id_conexao
-        flags = FLAGS_ACK
-        segmento = make_header(src_port, dst_port, self.server_seq_n, ack_n, flags)
-        segmento = fix_checksum(segmento, src_addr, dst_addr)
-        self.servidor.rede.enviar(segmento, dst_addr)
-
-
-    # seq_no = cliente_seq_n
     def _rdt_rcv(self, seq_no, ack_no, flags, payload):
-        print('recebido payload: %r' % payload)
+        # Verifica se a flag FLAGS_FIN está definida nos bits de "flags".
         if (flags & FLAGS_FIN == FLAGS_FIN):
+
+            # Chama a função de retorno de chamada (callback) com uma sequência vazia.
             self.callback(self, b'')
 
             # Atualiza o número de sequência com o valor de "ack_no".
             self.seq_no_comprimento = ack_no
 
+            # Desempacota o endereço de origem, porta de origem, endereço de destino e porta de destino da conexão.
             src_addr, src_port, dst_addr, dst_port = self.id_conexao
 
             # Cria um segmento com base nos valores anteriores e as flags especificadas.
@@ -235,9 +199,20 @@ class Conexao:
 
     # Os métodos abaixo fazem parte da API
 
-    # envia dados a partir da conexao TCP estabelecida
+    def registrar_recebedor(self, callback):
+        """
+        Usado pela camada de aplicação para registrar uma função para ser chamada
+        sempre que dados forem corretamente recebidos
+        """
+        self.callback = callback
+
     def enviar(self, dados):
+        """
+        Usado pela camada de aplicação para enviar dados
+        """
         src_addr, src_port, dst_addr, dst_port = self.id_conexao
+        
+        # Divide os dados em seguimentos com base no tamanho máximo de segmento (MSS)
         size = ceil(len(dados)/MSS)
         for i in range(size):
             self.seq_envio = self.seq_no_comprimento
@@ -252,7 +227,7 @@ class Conexao:
             # Corrige o checksum do segmento antes de enviar
             response = fix_checksum(segment, dst_addr, src_addr)
 
-            # Verifica se o segmento pode ser enviado com base na janela (tamanho_janela)
+            # Verifica se o segmento pode ser enviado com base na janela deslizante (tamanho_janela)
             if self.comprimento_seguimentos_enviados + len_dados <= self.tamanho_janela:
                 # Envia o segmento para o servidor de rede
                 self.servidor.rede.enviar(response, src_addr)
@@ -267,12 +242,15 @@ class Conexao:
                     self.timer = asyncio.get_event_loop().call_later(self.TimeoutInterval, self._temporizador)
             else:
                 # Se a janela estiver cheia, coloca o segmento na fila de espera
-                self.fila_seguimentos_esperando.append((response, src_addr, len_dados))
+                self.fila_seguimentos_esperando.append((response, src_addr, len_dados))       
 
 
     def fechar(self):
-
-        # Atualiza o número de sequência a ser enviado
+        """
+        Usado pela camada de aplicação para fechar a conexão
+        """
+        # Passo 4
+         # Atualiza o número de sequência a ser enviado
         self.seq_envio = self.seq_no_comprimento
 
         # Extrai informações sobre a conexão, como endereços e portas fonte e destino
