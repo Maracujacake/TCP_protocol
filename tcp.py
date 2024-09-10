@@ -36,7 +36,6 @@ class Servidor:
         if (flags & FLAGS_SYN) == FLAGS_SYN:
             conexao = self.conexoes[id_conexao] = Conexao(self, id_conexao, seq_no, ack_no)
 
-            # Passo 1
             # Numero arbitrario
             seq_envio = random.randint(0, 0xffff)
             # Atribua o próximo número de sequência esperado pelo dispositivo receptor
@@ -47,7 +46,6 @@ class Servidor:
             response = fix_checksum(segment, dst_addr, src_addr)
             # Envie o segmento de resposta
             self.rede.enviar(response, src_addr)
-            # Fim do passo 1
 
             if self.callback:
                 self.callback(conexao)
@@ -121,9 +119,7 @@ class Conexao:
             # Envia a resposta para o endereço de origem.
             self.servidor.rede.enviar(response, src_addr)
 
-        # Verifica se o número de sequência recebido é igual ao esperado.
         elif seq_no == self.seq_no_eperado:
-            # Atualiza o número de sequência esperado com o comprimento do payload, se houver.
             self.seq_no_eperado += (len(payload) if payload else 0)
 
             # Chama a função de retorno de chamada (callback) com o payload recebido.
@@ -164,7 +160,7 @@ class Conexao:
                         if seq == ack_no:
                             break
 
-                    # Passo 6: Calcula SampleRTT, EstimatedRTT e DevRTT e atualiza o TimeoutInterval.
+                    #Calcula SampleRTT, EstimatedRTT e DevRTT e atualiza o TimeoutInterval.
                     if firstTime:
                         self.SampleRTT = time.time() - firstTime
                         if self.checado == False:
@@ -176,12 +172,10 @@ class Conexao:
                             self.DevRTT = (1 - 0.25) * self.DevRTT + 0.25 * abs(self.SampleRTT - self.EstimatedRTT)
                         self.TimeoutInterval = self.EstimatedRTT + 4 * self.DevRTT
 
-                # Verifica as condições "a" e "nenhum_comprimento_seguimentos_enviados" para ajustar a janela de congestionamento.
                 nenhum_comprimento_seguimentos_enviados = self.comprimento_seguimentos_enviados == 0
                 if existe_fila_segmentos_esperando and nenhum_comprimento_seguimentos_enviados:
                     self.tamanho_janela += MSS
 
-                # Enquanto houver segmentos na fila de segmentos esperando e a janela permitir, envia segmentos.
                 while self.fila_seguimentos_esperando:
                     response, src_addr, len_dados = self.fila_seguimentos_esperando.popleft()
 
@@ -250,8 +244,7 @@ class Conexao:
         """
         Usado pela camada de aplicação para fechar a conexão
         """
-        # Passo 4
-         # Atualiza o número de sequência a ser enviado
+        # Atualiza o número de sequência a ser enviado
         self.seq_envio = self.seq_no_comprimento
 
         # Extrai informações sobre a conexão, como endereços e portas fonte e destino
