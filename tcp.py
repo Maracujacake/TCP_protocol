@@ -1,4 +1,5 @@
 import asyncio
+from math import ceil
 import time
 # arquivo disponibilizado pelo prof. com funções que facilitam a implementação
 from tcputils import *
@@ -19,12 +20,11 @@ class Servidor:
     def _rdt_rcv(self, src_addr, dst_addr, segment):
         src_port, dst_port, seq_no, ack_no, flags, window_size, checksum, urg_ptr = read_header(segment)
 
-        print(f'Received segment from {src_addr}:{src_port} to {dst_addr}:{dst_port}')
         # Consideramos somente a porta do nosso servidor
         if dst_port != self.porta:
             return
         if not self.rede.ignore_checksum and calc_checksum(segment, src_addr, dst_addr) != 0:
-            print('descartando segmento com checksum incorreto')
+            print('Descartando segmento com "checksum" incorreto')
             return
 
         payload = segment[4*(flags>>12):]
@@ -32,7 +32,6 @@ class Servidor:
 
         # Estabelecer conexão
         if (flags & FLAGS_SYN) == FLAGS_SYN:
-            print(f'Estabelecendo conexão com {src_addr}:{src_port}')
             conexao = self.conexoes[id_conexao] = Conexao(self, id_conexao, seq_no)
             # confirma estabelecimento de conexão
             conexao.enviar_syn_ack()
@@ -73,6 +72,25 @@ class Conexao:
     def _exemplo_timer(self):
         print('Este é um exemplo de como fazer um timer')
 
+    def _temporizador(self):
+        self.timer = None
+        self.tamanho_janela = self.tamanho_janela/2
+
+        # Verifica se a fila de segmentos enviados não está vazia.
+        if self.fila_seguimentos_enviados:
+
+            # Remove o primeiro elemento da fila e desempacota seus valores.
+            segment, addr, len_dados = self.fila_seguimentos_enviados.popleft()[1:]
+
+            # Adiciona uma nova tupla com 0 na frente da fila de segmentos enviados.
+            self.fila_seguimentos_enviados.appendleft((0, segment, addr, len_dados))
+
+            # Realiza a operação de envio do segmento para o endereço especificado.
+            self.servidor.rede.enviar(segment, addr)
+
+            # Configura um temporizador para chamar a função _temporizador após o intervalo de tempo especificado.
+            self.timer = asyncio.get_event_loop().call_later(self.TimeoutInterval, self._temporizador)
+
     def iniciar_timer(self, intervalo):
         self.timer = asyncio.get_event_loop().call_later(intervalo, self.TimeoutOcorrido)
 
@@ -85,7 +103,7 @@ class Conexao:
         if(self.EstimatedRTT == None or self.DevRTT == None):
             return 1.0
         
-        return self.EstimatedRTT + max(self.G, 4 * self.DevRTT) # volta o valor de DevRTT na maior parte das vezes
+        return self.EstimatedRTT + max(self.G, 4 * self.DevRTT)
 
     def reenviar_pacotes(self):
         for segmento in self.pacotes_nao_rec.items():
@@ -121,102 +139,150 @@ class Conexao:
     # seq_no = cliente_seq_n
     def _rdt_rcv(self, seq_no, ack_no, flags, payload):
         print('recebido payload: %r' % payload)
+        if (flags & FLAGS_FIN == FLAGS_FIN):
+            self.callback(self, b'')
 
-        if(ack_no in self.pacotes_nao_rec):
-            # tempo que demorou para o pacote ser transmitido
-            sample_rtt = time.time() - self.envio_inicio
+            # Atualiza o número de sequência com o valor de "ack_no".
+            self.seq_no_comprimento = ack_no
 
-            # caso seja o primeiro pacote a ser transmitido
-            if(self.EstimatedRTT == None):
-                self.EstimatedRTT = sample_rtt
-                self.DevRTT = sample_rtt / 2
+            src_addr, src_port, dst_addr, dst_port = self.id_conexao
 
-            #atualiza os valores com base no tempo de transmissao
-            else:
-                alpha = 0.125
-                beta = 0.25
-                self.EstimatedRTT = (1 - alpha) * self.EstimatedRTT + alpha * sample_rtt
-                self.DevRTT = (1 - beta) * self.DevRTT + beta * abs(sample_rtt - self.EstimatedRTT)
+            # Cria um segmento com base nos valores anteriores e as flags especificadas.
+            segment = make_header(dst_port, src_port, self.seq_envio, self.seq_no_eperado + 1, flags)
 
-            # inicia o timer com o novo padrão
-            self.cancelar_timer()
-            self.iniciar_timer(self.TimeoutInterval)
+            # Calcula o checksum do segmento e cria uma resposta com o checksum corrigido.
+            response = fix_checksum(segment, dst_addr, src_addr)
 
-            # retira o pacote da lista de não reconhecidos
-            del self.pacotes_nao_rec[ack_no]
+            # Envia a resposta para o endereço de origem.
+            self.servidor.rede.enviar(response, src_addr)
 
+        # Verifica se o número de sequência recebido é igual ao esperado.
+        elif seq_no == self.seq_no_eperado:
+            # Atualiza o número de sequência esperado com o comprimento do payload, se houver.
+            self.seq_no_eperado += (len(payload) if payload else 0)
 
-        if(len(self.pacotes_nao_rec) == 0):
-            if(self.cwnd < self.ssthresh):
-                self.cwnd += Conexao.MSS
-            else:
-                self.cwnd += (Conexao.MSS * Conexao.MSS)
+            # Chama a função de retorno de chamada (callback) com o payload recebido.
+            self.callback(self, payload)
 
-        if(flags & FLAGS_FIN) == FLAGS_FIN: 
-            self.enviar_ack(seq_no + 1)
-            if self.callback:
-                self.callback(self, b'')
-            return
+            # Atualiza o número de sequência com o valor de "ack_no".
+            self.seq_no_comprimento = ack_no
 
-        """
-        numero de confirmação do cliente for igual ao esperado (número dele + 1), 
-        o pacote está sendo recebido em ordem
-        """
-        if(seq_no == self.seq_n_esperado):
-            """
-            adiciona no n_esperado o tamanho do payload, para que na proxima vez que seja recebido outro,
-            seja possível compararmos se está em ordem
-            ex: não tínhamos recebido payload algum então digamos que o n_esperado esteja em 1 (0 + 1 do acknowledge)
-            - ao receber um payload de 100 bytes, passa a ser 101
-            - proximo payload que começa no 101 (ou no 100 pq começa em 0?) vai verificar o número esperado pra ver se bate
-            """
-            if self.callback:
-                self.callback(self, payload)
-            self.seq_n_esperado += len(payload)
-            self.enviar_ack(self.seq_n_esperado)
-        # recebimento fora de ordem
-        else:
-            # envia sem alterar o n_esperado
-            self.enviar_ack(self.seq_n_esperado)
+            # Verifica se a flag FLAGS_ACK está definida nos bits de "flags".
+            if (flags & FLAGS_ACK) == FLAGS_ACK:
 
-        # recebimento do pacote concluido, retira-o do conjunto de pacotes não reconhecidos e para o timer
-        if(ack_no > self.server_seq_n):
-            self.server_seq_n = ack_no
-            if(ack_no in self.pacotes_nao_rec):
-                del self.pacotes_nao_rec[ack_no]
-            # cancela o timer para evitar possíveis retransmissões
-            self.cancelar_timer()
+                # Verifica se o payload tem tamanho maior que 0.
+                if payload:
+                    src_addr, src_port, dst_addr, dst_port = self.id_conexao
+
+                    # Cria um segmento com base nos valores anteriores e as flags especificadas.
+                    segment = make_header(dst_port, src_port, self.seq_envio, self.seq_no_eperado, flags)
+
+                    # Calcula o checksum do segmento e cria uma resposta com o checksum corrigido.
+                    response = fix_checksum(segment, dst_addr, src_addr)
+
+                    # Envia a resposta para o endereço de origem.
+                    self.servidor.rede.enviar(response, src_addr)
+
+                # Verifica se há segmentos na fila de segmentos enviados.
+                existe_fila_segmentos_esperando = self.comprimento_seguimentos_enviados > 0
+
+                # Cancela o temporizador se estiver ativo.
+                if self.timer:
+                    self.timer.cancel()
+                    self.timer = None
+
+                    # Procura na fila de segmentos enviados até encontrar um segmento com número de sequência igual a "ack_no".
+                    while self.fila_seguimentos_enviados:
+                        firstTime, segmento, _, len_dados = self.fila_seguimentos_enviados.popleft()
+                        self.comprimento_seguimentos_enviados -= len_dados
+                        seq = read_header(segmento)[2]
+                        if seq == ack_no:
+                            break
+
+                    # Passo 6: Calcula SampleRTT, EstimatedRTT e DevRTT e atualiza o TimeoutInterval.
+                    if firstTime:
+                        self.SampleRTT = time.time() - firstTime
+                        if self.checado == False:
+                            self.checado = True
+                            self.EstimatedRTT = self.SampleRTT
+                            self.DevRTT = self.SampleRTT / 2
+                        else:
+                            self.EstimatedRTT = (1 - 0.125) * self.EstimatedRTT + 0.125 * self.SampleRTT
+                            self.DevRTT = (1 - 0.25) * self.DevRTT + 0.25 * abs(self.SampleRTT - self.EstimatedRTT)
+                        self.TimeoutInterval = self.EstimatedRTT + 4 * self.DevRTT
+
+                # Verifica as condições "a" e "nenhum_comprimento_seguimentos_enviados" para ajustar a janela de congestionamento.
+                nenhum_comprimento_seguimentos_enviados = self.comprimento_seguimentos_enviados == 0
+                if existe_fila_segmentos_esperando and nenhum_comprimento_seguimentos_enviados:
+                    self.tamanho_janela += MSS
+
+                # Enquanto houver segmentos na fila de segmentos esperando e a janela permitir, envia segmentos.
+                while self.fila_seguimentos_esperando:
+                    response, src_addr, len_dados = self.fila_seguimentos_esperando.popleft()
+
+                    if self.comprimento_seguimentos_enviados + len_dados > self.tamanho_janela:
+                        self.fila_seguimentos_esperando.appendleft((response, src_addr, len_dados))
+                        break
+
+                    self.comprimento_seguimentos_enviados += len_dados
+                    self.servidor.rede.enviar(response, src_addr)
+                    self.fila_seguimentos_enviados.append((time.time(), response, src_addr, len_dados))
+
+                # Se ainda houver segmentos na fila de segmentos enviados, configura o temporizador.
+                if self.fila_seguimentos_enviados:
+                    self.timer = asyncio.get_event_loop().call_later(self.TimeoutInterval, self._temporizador)
 
 
     # Os métodos abaixo fazem parte da API
 
-    def registrar_recebedor(self, callback):
-        self.callback = callback
-
     # envia dados a partir da conexao TCP estabelecida
     def enviar(self, dados):
         src_addr, src_port, dst_addr, dst_port = self.id_conexao
-        flags = FLAGS_ACK
-        # passamos o numero que caracteriza o servidor/recebedor e o numero esperado do cliente que vai receber
-        segmento = make_header(src_port, dst_port, self.server_seq_n, self.seq_n_esperado, flags)
-        segmento += dados
-        segmento = fix_checksum(segmento, src_addr, dst_addr)
-        self.envio_inicio = time.time()
-        self.servidor.rede.enviar(segmento, dst_addr)
-        """
-        assim como adicionamos o tamanho do payload na função de recebimento,
-        precisamos adicionar o tamanho do payload no numero de quem enviou também
-        """
-        self.pacotes_nao_rec[self.server_seq_n] = segmento
-        self.server_seq_n += len(dados)
+        size = ceil(len(dados)/MSS)
+        for i in range(size):
+            self.seq_envio = self.seq_no_comprimento
+            # Cria um segmento de rede com informações como portas, números de sequência e a flag de reconhecimento (ACK)
+            segment = make_header(dst_port, src_port, self.seq_envio, self.seq_no_eperado, flags=FLAGS_ACK)
+            segment += (dados[ i * MSS : min((i + 1) * MSS, len(dados))])
 
-        # inicia timer para reenvio se necessario.
-        self.iniciar_timer(self.TimeoutInterval())
+            # Registra o tamanho dos dados no segmento atual
+            len_dados = len(dados[i * MSS : min((i + 1) * MSS, len(dados))])
+            self.seq_no_comprimento += len_dados
+
+            # Corrige o checksum do segmento antes de enviar
+            response = fix_checksum(segment, dst_addr, src_addr)
+
+            # Verifica se o segmento pode ser enviado com base na janela (tamanho_janela)
+            if self.comprimento_seguimentos_enviados + len_dados <= self.tamanho_janela:
+                # Envia o segmento para o servidor de rede
+                self.servidor.rede.enviar(response, src_addr)
+
+                # Registra o segmento enviado na fila de seguimentos enviados
+                self.fila_seguimentos_enviados.append((time.time(), response, src_addr, len_dados))
+
+                # Atualiza o comprimento total dos seguimentos enviados    
+                self.comprimento_seguimentos_enviados += len_dados
+                # Inicia um temporizador se necessário
+                if not self.timer:
+                    self.timer = asyncio.get_event_loop().call_later(self.TimeoutInterval, self._temporizador)
+            else:
+                # Se a janela estiver cheia, coloca o segmento na fila de espera
+                self.fila_seguimentos_esperando.append((response, src_addr, len_dados))
 
 
     def fechar(self):
+
+        # Atualiza o número de sequência a ser enviado
+        self.seq_envio = self.seq_no_comprimento
+
+        # Extrai informações sobre a conexão, como endereços e portas fonte e destino
         src_addr, src_port, dst_addr, dst_port = self.id_conexao
-        flags = FLAGS_FIN | FLAGS_ACK
-        segmento = make_header(src_port, dst_port, self.server_seq_n, self.seq_n_esperado, flags)
-        segmento = fix_checksum(segmento, src_addr, dst_addr)
-        self.servidor.rede.enviar(segmento, dst_addr)
+
+        # Cria um segmento de rede com informações como portas, números de sequência e a flag de finalização (FIN)
+        segment = make_header(dst_port, src_port, self.seq_envio, self.seq_no_eperado + 1, FLAGS_FIN)
+
+        # Calcula e corrige o checksum do segmento antes de enviar
+        response = fix_checksum(segment, dst_addr, src_addr)
+
+        # Envia o segmento de dados para o servidor de rede
+        self.servidor.rede.enviar(response, src_addr)
