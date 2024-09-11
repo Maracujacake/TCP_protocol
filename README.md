@@ -8,15 +8,24 @@ Podemos interpretar isso como uma pessoa ligando para outra a partir de um telef
 
 ![image](https://github.com/user-attachments/assets/e935a0cc-fc49-4061-84e4-f84118e5e24b)
 
+O recebimento do "telefonema" é mostrado abaixo, aonde um cliente tenta estabelecer uma conexão com o servidor a partir da flag SYN
+
 ```python
 #[...]
- # Estabelecer conexão
-        if (flags & FLAGS_SYN) == FLAGS_SYN:
-            conexao = self.conexoes[id_conexao] = Conexao(self, id_conexao)
-            # confirma estabelecimento de conexão
-            conexao.enviar_syn_ack()
-            if self.callback:
-                self.callback(conexao)
+#Estabelecimento de conexão
+ if (flags & FLAGS_SYN) == FLAGS_SYN:
+            conexao = self.conexoes[id_conexao] = Conexao(self, id_conexao, seq_no, ack_no)
+
+            # Numero arbitrario
+            seq_envio = random.randint(0, 0xffff)
+            # Atribua o próximo número de sequência esperado pelo dispositivo receptor
+            ack_envio = seq_no + 1
+            # Construa um segmento com SYN+ACK
+            segment = make_header(dst_port, src_port, seq_envio, ack_envio, FLAGS_SYN | FLAGS_ACK)
+            # Corrija o checksum do segmento
+            response = fix_checksum(segment, dst_addr, src_addr)
+            # Envie o segmento de resposta
+            self.rede.enviar(response, src_addr)
 #[...]
 
 ```
@@ -25,14 +34,14 @@ Quando você liga pra alguém, a pessoa que recebe a ligação, ao ver que o tel
 ![image](https://github.com/user-attachments/assets/5d5acbda-b206-4e7f-97e3-2a439c5f51d2)
 
 ```python
-    def enviar_syn_ack(self):
-        src_addr, src_port, dst_addr, dst_port = self.id_conexao
-        self.server_seq_n = 0 # modificar para um numero aleatorio posteriormente por segurança
-        ack_n = self.cliente_seq_n + 1
-        flags = FLAGS_SYN | FLAGS_ACK
-        segmento = make_header(src_port, dst_port, self.server_seq_n, flags)
-        segmento = fix_checksum(segmento, src_addr, dst_addr)
-        self.servidor.rede.enviar(segmento, dst_addr) 
+[...]
+     # Construa um segmento com SYN+ACK
+            segment = make_header(dst_port, src_port, seq_envio, ack_envio, FLAGS_SYN | FLAGS_ACK)
+            # Corrija o checksum do segmento
+            response = fix_checksum(segment, dst_addr, src_addr)
+            # Envie o segmento de resposta
+            self.rede.enviar(response, src_addr)
+[...]
 ```
 
 O cliente por sua vez diz "Alô" quando o telefone é atendido, no nosso caso, envia uma confirmação de volta pro servidor pra dizer que, de fato, uma conexão foi estabelecida
@@ -40,11 +49,24 @@ O cliente por sua vez diz "Alô" quando o telefone é atendido, no nosso caso, e
 ![image](https://github.com/user-attachments/assets/7945ad00-96c4-4e3f-b8be-ef2ff7efb752)
 
 ```python
-    def enviar_ack(self, ack_n):
-        src_addr, src_port, dst_addr, dst_port = self.id_conexao
-        flags = FLAGS_ACK
-        segmento = make_header(src_port, dst_port, self.server_seq_n, ack_n, flags)
-        self.servidor.rede.enviar(segmento, dst_addr)
+    def _rdt_rcv(self, seq_no, ack_no, flags, payload):
+            [...]
+            # Verifica se a flag FLAGS_ACK está definida nos bits de "flags".
+            if (flags & FLAGS_ACK) == FLAGS_ACK:
+
+                # Verifica se o payload tem tamanho maior que 0.
+                if payload:
+                    src_addr, src_port, dst_addr, dst_port = self.id_conexao
+
+                    # Cria um segmento com base nos valores anteriores e as flags especificadas.
+                    segment = make_header(dst_port, src_port, self.seq_envio, self.seq_no_eperado, flags)
+
+                    # Calcula o checksum do segmento e cria uma resposta com o checksum corrigido.
+                    response = fix_checksum(segment, dst_addr, src_addr)
+
+                    # Envia a resposta para o endereço de origem.
+                    self.servidor.rede.enviar(response, src_addr)
+            [...]
 ```
 
 ## Passo 2 - Recebimento de um payload
@@ -54,16 +76,17 @@ verificações constantes com base nos números que salvamos para as entidades q
 
 ```python
 class Conexao:
-    def __init__(self, servidor, id_conexao, cliente_seq_n):
-        self.cliente_seq_n = cliente_seq_n
-        self.server_seq_n = 0 # número arbitrário, alterar se necessário
-        self.seq_n_esperado = cliente_seq_n + 1 # número para verificar a ordem da conversação entre usuário e servidor
-        self.servidor = servidor
-        self.id_conexao = id_conexao
+    # Adicionado seq_no e ack_no
+    def __init__(self, servidor, id_conexao, seq_no, ack_no):
+        self.servidor = servidor # Servidor que estaremos em conexao
+        self.id_conexao = id_conexao # o id da conexão entre as conexões
         self.callback = None
-        self.timer = asyncio.get_event_loop().call_later(1, self._exemplo_timer)
-        #self.timer.cancel()   #é possível cancelar o timer chamando esse método
-
+        self.seq_envio = random.randint(0, 0xffff) # numero arbitrario para envio
+        self.seq_no_eperado = seq_no + 1 # numero de recebimento esperado (numero da sequencia + 1)
+        self.seq_no_comprimento = ack_no
+        self.fila_seguimentos_enviados = deque() # filas de pacotes enviados e recebidos
+        self.fila_seguimentos_esperando = deque()
+        [...]
 ```
 
 Nas imagens do passo anterior, podemos observar que há coisas como "seq = A" ou "seq = B", vamos colocar isso como um número arbitrário.
@@ -74,49 +97,30 @@ Digamos que comecemos com o número do cliente e do servidor em 0, e, ao receber
 Segundamente podemos comparar se o arquivo foi totalmente recebido, afinal, no final da transferência, a diferença do numero inicial pro numero final do cliente (ou servidor) será o tamanho do arquivo
 
 ```python
-    # seq_no = cliente_seq_n
-    def _rdt_rcv(self, seq_no, ack_no, flags, payload):
-    #[...]
-        """
-        numero de confirmação do cliente for igual ao esperado (número dele + 1), 
-        o pacote está sendo recebido em ordem
-        """
-        if(seq_no == self.seq_n_esperado):
-            """
-            adiciona no n_esperado o tamanho do payload, para que na proxima vez que seja recebido outro,
-            seja possível compararmos se está em ordem
-            ex: não tínhamos recebido payload algum então digamos que o n_esperado esteja em 1 (0 + 1 do acknowledge)
-            - ao receber um payload de 100 bytes, passa a ser 101
-            - proximo payload que começa no 101 (ou no 100 pq começa em 0?) vai verificar o número esperado pra ver se bate
-            """
-            self.seq_n_esperado += len(payload)
-            self.enviar_ack(self.seq_n_esperado)
-            if self.callback:
-                self.callback(self, payload)
+[...]
+        elif seq_no == self.seq_no_eperado:
+            self.seq_no_eperado += (len(payload) if payload else 0)
 
-        # recebimento fora de ordem
-        else:
-            # envia sem alterar o n_esperado
-            self.enviar_ack(self.seq_n_esperado)
+            # Chama a função de retorno de chamada (callback) com o payload recebido.
+            self.callback(self, payload)
+
+            # Atualiza o número de sequência com o valor de "ack_no".
+            self.seq_no_comprimento = ack_no
+[...]
 ```
 ## Passo 3 — Envio de dados
 Para completar esse passo precisamos, dentre algumas coisas, passar uma flag de ACKnowledge para confirmar o recebimento de um pacote,
 só então criamos um cabeçalho com as informações de envio e os dados em si
 
 ```python
- def enviar(self, dados):
-        src_addr, src_port, dst_addr, dst_port = self.id_conexao
-        flags = FLAGS_ACK
-        # passamos o numero que caracteriza o servidor/recebedor e o numero esperado do cliente que vai receber
-        segmento = make_header(src_port, dst_port, self.server_seq_n, self.seq_n_esperado, flags)
-        segmento += dados
-        segmento = fix_checksum(segmento, src_addr, dst_addr)
-        self.servidor.rede.enviar(segmento, dst_addr)
-        """
-        assim como adicionamos o tamanho do payload na função de recebimento,
-        precisamos adicionar o tamanho do payload no numero de quem enviou também
-        """
-        self.server_seq_n += len(dados) 
+    def enviar(self, dados):
+            [...]
+            # Cria um segmento de rede com informações como portas, números de sequência e a flag de reconhecimento (ACK)
+            segment = make_header(dst_port, src_port, self.seq_envio, self.seq_no_eperado, flags=FLAGS_ACK)
+            segment += (dados[ i * MSS : min((i + 1) * MSS, len(dados))])
+            [...]
+            # Corrige o checksum do segmento antes de enviar
+            response = fix_checksum(segment, dst_addr, src_addr)
 
 ```
 
@@ -129,12 +133,21 @@ Então, uma entidade envia a flag FIN com intuito de FINalizar a conexão, e o o
 O mesmo acontece com a outra entidade, envia uma flag FIN para ser respondida com um ACK
 
 ```python
-def fechar(self):
+    def fechar(self):
+        # Atualiza o número de sequência a ser enviado
+        self.seq_envio = self.seq_no_comprimento
+
+        # Extrai informações sobre a conexão, como endereços e portas fonte e destino
         src_addr, src_port, dst_addr, dst_port = self.id_conexao
-        flags = FLAGS_FIN | FLAGS_ACK
-        segmento = make_header(src_port, dst_port, self.server_seq_n, self.seq_n_esperado, flags)
-        segmento = fix_checksum(segmento, src_addr, dst_addr)
-        self.servidor.rede.enviar(segmento, dst_addr)
+
+        # Cria um segmento de rede com informações como portas, números de sequência e a flag de finalização (FIN)
+        segment = make_header(dst_port, src_port, self.seq_envio, self.seq_no_eperado + 1, FLAGS_FIN)
+
+        # Calcula e corrige o checksum do segmento antes de enviar
+        response = fix_checksum(segment, dst_addr, src_addr)
+
+        # Envia o segmento de dados para o servidor de rede
+        self.servidor.rede.enviar(response, src_addr)
 ```
 
 Só são enviadas informações padrões do cabeçalho (portas, endereços) e as flags que indicam o encerramento.
@@ -143,13 +156,26 @@ Para isso causar algum efeito, devemos adicionar uma verificação nas funções
 
 ```python
 def _rdt_rcv(self, seq_no, ack_no, flags, payload):
-        print('recebido payload: %r' % payload)
+        # Verifica se a flag FLAGS_FIN está definida nos bits de "flags".
+        if (flags & FLAGS_FIN == FLAGS_FIN):
 
-        if(flags & FLAGS_FIN) == FLAGS_FIN: 
-            self.enviar_ack(seq_no + 1)
-            if self.callback:
-                self.callback(self, b'')
-            return
+            # Chama a função de retorno de chamada (callback) com uma sequência vazia.
+            self.callback(self, b'')
+
+            # Atualiza o número de sequência com o valor de "ack_no".
+            self.seq_no_comprimento = ack_no
+
+            # Desempacota o endereço de origem, porta de origem, endereço de destino e porta de destino da conexão.
+            src_addr, src_port, dst_addr, dst_port = self.id_conexao
+
+            # Cria um segmento com base nos valores anteriores e as flags especificadas.
+            segment = make_header(dst_port, src_port, self.seq_envio, self.seq_no_eperado + 1, flags)
+
+            # Calcula o checksum do segmento e cria uma resposta com o checksum corrigido.
+            response = fix_checksum(segment, dst_addr, src_addr)
+
+            # Envia a resposta para o endereço de origem.
+            self.servidor.rede.enviar(response, src_addr)
         #[...]
 ```
 
@@ -164,53 +190,35 @@ Na imagem acima (Slide - 41, Kurose) podemos ver exatamente essa situação ocor
 
 Para isso, precisamos implementar uma função que inicie este timer e uma que o encerre para quando o pacote for recebido:
 ```python
-    def iniciar_timer(self, intervalo):
-        self.timer = asyncio.get_event_loop().call_later(intervalo, self.reenviar_pacotes)
-
-    def cancelar_timer(self):
-        self.timer.cancel()
+    def _temporizador(self):
         self.timer = None
+        self.tamanho_janela = self.tamanho_janela/2
+
+        # Verifica se a fila de segmentos enviados não está vazia.
+        if self.fila_seguimentos_enviados:
+
+            # Remove o primeiro elemento da fila e desempacota seus valores.
+            segment, addr, len_dados = self.fila_seguimentos_enviados.popleft()[1:]
+
+            # Adiciona uma nova tupla com 0 na frente da fila de segmentos enviados.
+            self.fila_seguimentos_enviados.appendleft((0, segment, addr, len_dados))
+
+            # Realiza a operação de envio do segmento para o endereço especificado.
+            self.servidor.rede.enviar(segment, addr)
+
+            # Configura um temporizador para chamar a função _temporizador após o intervalo de tempo especificado.
+            self.timer = asyncio.get_event_loop().call_later(self.TimeoutInterval, self._temporizador)
 ```
 
-Além disso, precisamos de uma função que reenviará os pacotes perdidos e precisamos iniciar esse timer no momento em que o pacote for enviado:
-
-```python
-    def reenviar_pacotes(self):
-        for segmento in self.pacotes_nao_rec.items():
-            print("Reenviando segmento")
-            self.servidor.rede.enviar(segmento, self.id_conexao[2])
-        self.iniciar_timer(1)
-```
-
-```python
-    def enviar(self, dados):
-        #[...]
-        self.envio_inicio = time.time()
-        self.servidor.rede.enviar(segmento, dst_addr)
-        """
-        assim como adicionamos o tamanho do payload na função de recebimento,
-        precisamos adicionar o tamanho do payload no numero de quem enviou também
-        """
-        self.pacotes_nao_rec[self.server_seq_n] = segmento
-        self.server_seq_n += len(dados)
-
-        # inicia timer para reenvio se necessario.
-        self.iniciar_timer(self.TimeoutInterval())
-```
-
-Também chamamos a função que encerra o timer no eventual recebimento do pacote
+Para encerrar o timer no eventual recebimento do pacote
 ```python
     def _rdt_rcv(self, seq_no, ack_no, flags, payload):
         # [...]
-        # recebimento do pacote concluido, retira-o do conjunto de pacotes não reconhecidos e para o timer
-        if(ack_no > self.server_seq_n):
-            self.server_seq_n = ack_no
-            if(ack_no in self.pacotes_nao_rec):
-                del self.pacotes_nao_rec[ack_no]
-            # cancela o timer para evitar possíveis retransmissões
-            self.cancelar_timer()
+        # Cancela o temporizador se estiver ativo.
+        if self.timer:
+           self.timer.cancel()
+           self.timer = None
 ```
-Lembrando que adicionamos um dicionário de pacotes_não_reconhecidos em Conexão
 
 ## Passo 6 — Tempo de tolerância para perda de pacotes
 Como podemos inferir quanto tempo é adequado para que um pacote seja dado como "Deu ruim, tem que enviar de novo"? Não podemos escolher um número arbitrário como, sei lá, 1 segundo. Imagine que estamos tratando de pacotes de informações ENORMES que não teriam como ser enviados em um segundo.. daria problema. Para isso, podemos medir um tempo adequado utilizando o seguinte:
@@ -223,46 +231,22 @@ EstimatedRTT = (1 - alpha) * EstimatedRTT + alpha * sample_rtt,
 
 DevRTT = (1 - beta) * DevRTT + beta * abs(sample_rtt - self.EstimatedRTT)
 
-Definimos então a função e a atualizamos conforme os pacotes forem sendo recebidos, lembrando que no primeiro a ser enviado/recebido utilizamos um valor fixo, afinal não dá pra ter uma noção sem pelo menos UM pacote ter sido enviado
+Atualizamos conforme os pacotes forem sendo recebidos, lembrando que no primeiro a ser enviado/recebido utilizamos um valor fixo, afinal não dá pra ter uma noção sem pelo menos UM pacote ter sido enviado
 
 ```python
-    def TimeoutInterval(self):
-        # primeiro pacote a ser enviado
-        if(self.EstimatedRTT == None or self.DevRTT == None):
-            return 1.0
-        
-        return self.EstimatedRTT + max(self.G, 4 * self.DevRTT) # volta o valor de DevRTT na maior parte das vezes
+[...]
+#Calcula SampleRTT, EstimatedRTT e DevRTT e atualiza o TimeoutInterval.
+   if firstTime:
+      self.SampleRTT = time.time() - firstTime
+      if self.checado == False:
+         self.checado = True
+         self.EstimatedRTT = self.SampleRTT
+         self.DevRTT = self.SampleRTT / 2
+   else:
+      self.EstimatedRTT = (1 - 0.125) * self.EstimatedRTT + 0.125 * self.SampleRTT
+      self.DevRTT = (1 - 0.25) * self.DevRTT + 0.25 * abs(self.SampleRTT - self.EstimatedRTT)
+   self.TimeoutInterval = self.EstimatedRTT + 4 * self.DevRTT
 ```
-
-```python
-    def _rdt_rcv(self, seq_no, ack_no, flags, payload):
-        print('recebido payload: %r' % payload)
-
-        if(ack_no in self.pacotes_nao_rec):
-            # tempo que demorou para o pacote ser transmitido
-            sample_rtt = time.time() - self.envio_inicio
-
-            # caso seja o primeiro pacote a ser transmitido
-            if(self.EstimatedRTT == None):
-                self.EstimatedRTT = sample_rtt
-                self.DevRTT = sample_rtt / 2
-
-            #atualiza os valores com base no tempo de transmissao
-            else:
-                alpha = 0.125
-                beta = 0.25
-                self.EstimatedRTT = (1 - alpha) * self.EstimatedRTT + alpha * sample_rtt
-                self.DevRTT = (1 - beta) * self.DevRTT + beta * abs(sample_rtt - self.EstimatedRTT)
-
-            # inicia o timer com o novo padrão
-            self.cancelar_timer()
-            self.iniciar_timer(self.TimeoutInterval)
-
-            # retira o pacote da lista de não reconhecidos
-            del self.pacotes_nao_rec[ack_no]
-#[...]
-```
-
 
 ## Passo 7 — Janela de congestionamento
 Quando enviamos arquivos muito grandes ou então muitos arquivos estão sendo enviados, pode ser que acabe gerando congestionamento na rede (podendo ocasionar em lentidão, perda de pacotes, etc). Para evitar isso, utilizamos uma "janela" de congestionamento, isto é, um intervalo de "tamanho" de dados que serão enviados e devem ser sinalizados como recebidos para enviar uma nova parcela de dados do mesmo tamanho ou gradualmente maior
@@ -272,23 +256,25 @@ Quando enviamos arquivos muito grandes ou então muitos arquivos estão sendo en
 Na imagem acima podemos ver o estado de slow start, isto é, conforme os primeiros pacotes vão sendo enviados, o tamanho da janela (colocamos como 1) vai aumentando gradualmente em pequenos valores e quando atingir um ápice, que consideramos aqui como 64 (64 * 1 = 64), o aumento se torna ainda maior
 
 ```python
-    def _rdt_rcv(self, seq_no, ack_no, flags, payload):
 #[...]
-        if(len(self.pacotes_nao_rec) == 0):
-            if(self.cwnd < self.ssthresh):
-                self.cwnd += Conexao.MSS
-            else:
-                self.cwnd += (Conexao.MSS * Conexao.MSS)
+   self.tamanho_janela = 1 * MSS
+#[...]
+   if existe_fila_segmentos_esperando and nenhum_comprimento_seguimentos_enviados:
+      self.tamanho_janela += MSS
 #[...]
 ```
 
-No entanto, sempre que um timeout ocorre, isto é, sempre que algum pacote é perdido ou atrasado, cortamos o "ápice"/"teto" pela metade e voltamos a janela ao valor original:
 
 ```python
-    def TimeoutOcorrido(self):
-        self.ssthresh = max(self.cwnd // 2, Conexao.MSS)
-        self.cwnd = Conexao.MSS
-        self.reenviar_pacotes() # após a reconfiguração da janela de congest., envia novamente o pacote
+        size = ceil(len(dados)/MSS)
+        for i in range(size):
+            self.seq_envio = self.seq_no_comprimento
+            # Cria um segmento de rede com informações como portas, números de sequência e a flag de reconhecimento (ACK)
+            segment = make_header(dst_port, src_port, self.seq_envio, self.seq_no_eperado, flags=FLAGS_ACK)
+            segment += (dados[ i * MSS : min((i + 1) * MSS, len(dados))])
+
+            # Registra o tamanho dos dados no segmento atual
+            len_dados = len(dados[i * MSS : min((i + 1) * MSS, len(dados))])
 ```
 
-Isso é feito pois, para que haja perda de pacote, algo (como congestionamento na rede) deve ter ocorrido.
+A janela aumenta conforme o envio dos dados é bem sucedido. Se por acaso, houver congestionamento, ou melhor, o tamanho/quantidade de envio for maior ou igual à janela, os envios devem ser parados até que os anteriores sejam completados abrindo espaço.
